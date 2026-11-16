@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070913">
+    <meta name="description" content="Gestione riservata degli account Catcha.">
+    <title>Amministrazione — Catcha</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/admin.css">
+    <script src="/admin.js" defer></script>
+  </head>
+  <body>
+    <main class="admin-shell">
+      <header class="admin-header">
+        <a class="admin-brand" href="/" aria-label="Catcha, torna all'app"><span class="brand-mark">c.</span><span>catcha</span></a>
+        <a class="back-link" href="/">Torna a Catcha <span aria-hidden="true">↗</span></a>
+      </header>
+
+      <section class="admin-intro">
+        <p class="eyebrow">AREA RISERVATA · AMMINISTRATORE</p>
+        <h1>Gestisci gli<br><span>account.</span></h1>
+        <p class="intro-copy">Crea le credenziali per chi deve accedere a Catcha. Ogni account riceve una lista personale, separata dagli altri utenti.</p>
+      </section>
+
+      <section class="admin-panel" aria-labelledby="create-user-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">NUOVO ACCESSO</p>
+            <h2 id="create-user-title">Aggiungi un utente</h2>
+          </div>
+          <span class="panel-number" aria-hidden="true">01</span>
+        </div>
+        <form id="admin-user-form">
+          <label for="new-username">USERNAME</label>
+          <input id="new-username" name="username" autocomplete="off" minlength="3" maxlength="32" pattern="[A-Za-z0-9._\-]{3,32}" aria-describedby="username-hint" required>
+          <small id="username-hint" class="field-hint">Da 3 a 32 caratteri: lettere, numeri, punto, trattino o underscore.</small>
+
+          <label for="new-password">PASSWORD TEMPORANEA</label>
+          <input id="new-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="password-hint" required>
+          <small id="password-hint" class="field-hint">Scegli una password robusta e comunicala all'utente attraverso un canale sicuro. La password non sarà mostrata di nuovo.</small>
+
+          <button class="submit-button" id="create-user-button" type="submit"><span>Crea account</span><span aria-hidden="true">＋</span></button>
+          <p class="form-message" id="admin-message" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <section class="admin-panel users-panel" aria-labelledby="user-list-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">ACCOUNT ATTIVI</p>
+            <h2 id="user-list-title">Utenti configurati</h2>
+          </div>
+          <span class="user-count" id="user-count">—</span>
+        </div>
+        <p class="list-note">Gli account creati qui si possono eliminare insieme alla loro lista personale. Quelli configurati tramite variabili d'ambiente vanno rimossi dalla configurazione del server.</p>
+        <p class="list-message" id="list-message" role="status" aria-live="polite">Caricamento utenti…</p>
+        <ul class="user-list" id="user-list" aria-live="polite"></ul>
+      </section>
+
+      <footer class="admin-footer">
+        <span>Le password degli account creati qui vengono salvate come hash sul server.</span>
+        <span>© 2026 Catcha</span>
+      </footer>
+    </main>
+  </body>
+</html>

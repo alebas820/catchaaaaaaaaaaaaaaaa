@@ -1014,6 +1014,7 @@ async function loadAccountUsername() {
     const account = await response.json();
     if (typeof account.username !== "string" || !account.username.trim()) throw new Error("Il server non ha restituito lo username.");
     username.textContent = account.username;
+    document.getElementById("admin-link").hidden = account.isAdmin !== true;
   } catch {
     username.textContent = "Non disponibile";
     status.textContent = "Impossibile caricare lo username. Ricarica la pagina.";

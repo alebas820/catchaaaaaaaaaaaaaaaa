@@ -15,6 +15,7 @@ const managedUsers = new Map();
 const loginAttempts = new Map();
 const aiRequestLimits = new Map();
 const dataWriteQueues = new Map();
+const deletingAccounts = new Set();
 let managedUsersWriteQueue = Promise.resolve();
 const secureCookie = process.env.NODE_ENV === "production";
 const osmBusinessId = /^osm-(node|way|relation)-\d+$/;
@@ -68,6 +69,13 @@ const {adminAccount,configuredUsers} = (() => {
   const configuration = configureAccounts();
   return {adminAccount:configuration.admin,configuredUsers:configuration.users};
 })();
+function accountIsActive(accountKey) {
+  if (deletingAccounts.has(accountKey)) return false;
+  return Boolean((adminAccount && adminAccount.key === accountKey)
+    || configuredUsers.some(user => user.key === accountKey)
+    || managedUsers.has(accountKey));
+}
+
 if (secureCookie && (!adminAccount || !sessionSecret || sessionSecret.length < 32)) {
   throw new Error("Production requires CATCHA_ADMIN_USER, CATCHA_ADMIN_PASSWORD, and a CATCHA_SESSION_SECRET of at least 32 characters.");
 }
@@ -353,6 +361,59 @@ async function writeManagedUsers(users) {
     await fs.promises.rm(temporary,{force:true}).catch(() => undefined);
     throw error;
   }
+}
+
+function removeManagedUser(accountKey) {
+  const operation = managedUsersWriteQueue.catch(() => undefined).then(() => queueUserDataWrite(accountKey,async () => {
+    const user = managedUsers.get(accountKey);
+    if (!user) return null;
+    const dataFile = accountFilePath(accountKey);
+    const quarantinedFile = `${dataFile}.${crypto.randomBytes(8).toString("hex")}.deleted`;
+    let dataWasMoved = false;
+    try {
+      await fs.promises.rename(dataFile,quarantinedFile);
+      dataWasMoved = true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+
+    const remainingUsers = [...managedUsers.values()]
+      .filter(existing => existing.key !== accountKey)
+      .map(existing => ({
+        username:existing.username,
+        salt:existing.salt,
+        hash:existing.hash,
+        createdAt:existing.createdAt
+      }));
+    try {
+      await writeManagedUsers(remainingUsers);
+    } catch (error) {
+      if (dataWasMoved) {
+        try {
+          await fs.promises.rename(quarantinedFile,dataFile);
+        } catch (restoreError) {
+          console.error(`User data rollback failed (${restoreError.code || restoreError.name || "unknown error"})`);
+        }
+      }
+      throw error;
+    }
+
+    managedUsers.delete(accountKey);
+    for (const [sessionId,session] of sessions) {
+      if (session.accountKey === accountKey) sessions.delete(sessionId);
+    }
+    if (dataWasMoved) {
+      try {
+        await fs.promises.unlink(quarantinedFile);
+      } catch (error) {
+        console.error(`Deleted user data cleanup failed (${error.code || error.name || "unknown error"})`);
+        return {deleted:true,dataDeleted:false};
+      }
+    }
+    return {deleted:true,dataDeleted:true};
+  }));
+  managedUsersWriteQueue = operation;
+  return operation;
 }
 
 function sameOriginRequest(request) {
@@ -759,7 +820,35 @@ const server = http.createServer(async (request, response) => {
         ...configuredUsers.map(user => ({username:user.username,source:"environment"})),
         ...[...managedUsers.values()].map(user => ({username:user.username,source:"admin",createdAt:user.createdAt}))
       ];
-      return json(response,200,{users});
+      return json(response,200,{users,minimumPasswordLength});
+    }
+    if (request.method === "DELETE") {
+      if (!sameOriginRequest(request)) return json(response,403,{error:"Richiesta non autorizzata."});
+      let body;
+      try {
+        body = JSON.parse(await readBody(request));
+      } catch {
+        return json(response,400,{error:"Richiesta non valida."});
+      }
+      const identity = normalizeManagedUsername(body && body.username);
+      if (!identity) return json(response,400,{error:"Username non valido."});
+      if ((adminAccount && adminAccount.key === identity.key)
+        || configuredUsers.some(user => user.key === identity.key)) {
+        return json(response,409,{error:"Gli account configurati nell'ambiente non si eliminano da questa pagina."});
+      }
+      if (!managedUsers.has(identity.key)) return json(response,404,{error:"Account non trovato."});
+      if (deletingAccounts.has(identity.key)) return json(response,409,{error:"Eliminazione già in corso."});
+      deletingAccounts.add(identity.key);
+      try {
+        const result = await removeManagedUser(identity.key);
+        if (!result) return json(response,404,{error:"Account non trovato."});
+        return json(response,200,{ok:true,dataDeleted:result.dataDeleted});
+      } catch (error) {
+        console.error(`Managed account deletion failed (${error.code || error.name || "unknown error"})`);
+        return json(response,500,{error:"Impossibile completare l'eliminazione dell'account."});
+      } finally {
+        deletingAccounts.delete(identity.key);
+      }
     }
     if (request.method !== "POST") return json(response,405,{error:"Metodo non consentito."});
     if (!sameOriginRequest(request)) return json(response,403,{error:"Richiesta non autorizzata."});
@@ -777,6 +866,7 @@ const server = http.createServer(async (request, response) => {
       const result = await (managedUsersWriteQueue = managedUsersWriteQueue.catch(() => undefined).then(async () => {
         const usernameTaken = (adminAccount && adminAccount.key === identity.key)
           || configuredUsers.some(user => user.key === identity.key)
+          || deletingAccounts.has(identity.key)
           || managedUsers.has(identity.key);
         if (usernameTaken) return null;
         const passwordFields = await hashPassword(body.password);
@@ -799,10 +889,15 @@ const server = http.createServer(async (request, response) => {
     }
   }
   if (pathname === "/api/data" && request.method === "GET") {
+    if (!accountIsActive(session.accountKey)) return json(response,401,{error:"Account non più attivo."});
     try {
-      await (dataWriteQueues.get(session.accountKey) || Promise.resolve());
-      const data = await readUserData(session.accountKey);
-      return json(response,200,{...(data || emptyUserData()),hasData:Boolean(data)});
+      const result = await queueUserDataWrite(session.accountKey,async () => {
+        if (!accountIsActive(session.accountKey)) return {inactive:true};
+        const data = await readUserData(session.accountKey);
+        return {data:data || emptyUserData(),hasData:Boolean(data),inactive:false};
+      });
+      if (result.inactive) return json(response,401,{error:"Account non più attivo."});
+      return json(response,200,{...result.data,hasData:result.hasData});
     } catch (error) {
       console.error(`User data read failed (${error.code || error.name || "unknown error"})`);
       return json(response,500,{error:"Impossibile caricare i dati dell'account."});
@@ -820,14 +915,21 @@ const server = http.createServer(async (request, response) => {
     try {
       if (pathname === "/api/data/migrate") {
         const result = await queueUserDataWrite(session.accountKey,async () => {
+          if (!accountIsActive(session.accountKey)) return {inactive:true};
           const existing = await readUserData(session.accountKey);
           if (existing) return {data:existing,migrated:false};
           await writeUserData(session.accountKey,data);
           return {data,migrated:true};
         });
+        if (result.inactive) return json(response,401,{error:"Account non più attivo."});
         return json(response,200,{...result.data,hasData:true,migrated:result.migrated});
       }
-      await queueUserDataWrite(session.accountKey,() => writeUserData(session.accountKey,data));
+      const saved = await queueUserDataWrite(session.accountKey,async () => {
+        if (!accountIsActive(session.accountKey)) return false;
+        await writeUserData(session.accountKey,data);
+        return true;
+      });
+      if (!saved) return json(response,401,{error:"Account non più attivo."});
       return json(response,200,{ok:true});
     } catch (error) {
       console.error(`User data write failed (${error.code || error.name || "unknown error"})`);
