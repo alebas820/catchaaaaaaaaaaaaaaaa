@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070913">
+    <meta name="description" content="Accesso riservato a Catcha.">
+    <title>Accedi a Catcha</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Oxanium:wght@400;500;600;700;800&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/login.css">
+    <script src="/login.js" defer></script>
+  </head>
+  <body>
+    <main class="login-shell">
+      <a class="brand" href="/login" aria-label="Catcha"><span class="brand-mark">c.</span><span>catcha</span></a>
+      <section class="login-panel" aria-labelledby="login-title">
+        <div class="eyebrow"><span class="status-light"></span> ACCESSO RISERVATO</div>
+        <h1 id="login-title">Entra nel<br><span>tuo spazio.</span></h1>
+        <p class="intro">Inserisci le credenziali autorizzate per accedere a Catcha. Gli account vengono forniti dall'amministratore.</p>
+        <form id="login-form">
+          <label for="username">USERNAME</label>
+          <input id="username" name="username" autocomplete="username" required autofocus>
+          <label for="password">PASSWORD</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <button class="submit-button" type="submit"><span>ACCEDI A CATCHA</span><span aria-hidden="true">↗</span></button>
+          <p class="form-message" id="login-message" role="status" aria-live="polite"></p>
+        </form>
+        <a class="discord-button" href="https://discord.gg/CcAeCGGFPz" target="_blank" rel="noopener noreferrer">
+          <span class="discord-mark" aria-hidden="true">◉</span>
+          <span class="discord-copy"><strong>Discord ufficiale</strong><small>Per comprare l'accesso al sito entra nel server discord ufficiale</small></span>
+          <span class="discord-arrow" aria-hidden="true">↗</span>
+        </a>
+        <p class="no-signup"><span aria-hidden="true">⌁</span> Nessuna registrazione pubblica. Accesso solo su autorizzazione.</p>
+      </section>
+      <footer><span>© 2026 CATCHA · AREA PRIVATA</span><span>SESSIONE PROTETTA · 08H</span></footer>
+    </main>
+  </body>
+</html>
