@@ -600,6 +600,8 @@ function photonSearchUrl(bounds, center) {
 }
 
 function upstreamError(response, error) {
+  const reason = error && (error.status || (error.cause && error.cause.code) || error.name);
+  console.warn(`Map provider request failed (${reason || "unknown error"})`);
   if (error.name === "AbortError") return json(response, 504, {error:"Map request timed out"});
   if (error.status === 429) return json(response, 429, {error:"Map service is busy"});
   return json(response, 502, {error:"Map service is unavailable"});
