@@ -90,7 +90,9 @@ const photonCategories = [
 ];
 let nextGeocodeAt = 0;
 let geocodeQueue = Promise.resolve();
-const nominatimHeaders = {"Accept":"application/json","User-Agent":"Catcha/1.0 (local activity discovery)"};
+let nextPhotonRequestAt = 0;
+let photonRequestQueue = Promise.resolve();
+const publicMapHeaders = {"Accept":"application/json","User-Agent":"Catcha/1.0 (+https://github.com/alebas820/catchaaaaaaaaaaaaaaaa)"};
 
 const mimeTypes = {
   ".html":"text/html; charset=utf-8",
@@ -447,7 +449,7 @@ async function requestNominatim(url, timeoutMs = 5000) {
   const wait = Math.max(0,nextGeocodeAt - Date.now());
   if (wait) await new Promise(resolve => setTimeout(resolve,wait));
   nextGeocodeAt = Date.now() + 1100;
-  return fetchJson(url,{headers:nominatimHeaders},timeoutMs);
+  return fetchJson(url,{headers:publicMapHeaders},timeoutMs);
 }
 
 function queueNominatim(work) {
@@ -456,31 +458,79 @@ function queueNominatim(work) {
   return request;
 }
 
-function geocode(city, region) {
-  return queueNominatim(async search => {
-    const baseParams = {format:"jsonv2",addressdetails:"1",countrycodes:"it",limit:"8"};
-    const structuredUrl = new URL("https://nominatim.openstreetmap.org/search");
-    structuredUrl.search = new URLSearchParams({
-      ...baseParams,
-      ...(city ? {city} : {}),
-      ...(region ? {state:region} : {}),
-      country:"Italy"
-    }).toString();
-    let structuredResults;
-    try {
-      structuredResults = await search(structuredUrl);
-    } catch (error) {
-      if (error.name !== "AbortError" && ![502,503,504].includes(error.status)) throw error;
-    }
-    if (Array.isArray(structuredResults) && structuredResults.length) return structuredResults;
-
-    const freeSearchUrl = new URL("https://nominatim.openstreetmap.org/search");
-    freeSearchUrl.search = new URLSearchParams({
-      ...baseParams,
-      q:[city,region,"Italia"].filter(Boolean).join(", ")
-    }).toString();
-    return search(freeSearchUrl);
+function requestPhoton(url, timeoutMs = 10000) {
+  const request = photonRequestQueue.catch(() => undefined).then(async () => {
+    const wait = Math.max(0,nextPhotonRequestAt - Date.now());
+    if (wait) await new Promise(resolve => setTimeout(resolve,wait));
+    nextPhotonRequestAt = Date.now() + 1100;
+    return fetchJson(url,{headers:publicMapHeaders},timeoutMs);
   });
+  photonRequestQueue = request.then(() => undefined,() => undefined);
+  return request;
+}
+
+function photonGeocodeUrl(city,region) {
+  const url = new URL("https://photon.komoot.io/api/");
+  url.searchParams.set("q",[city,region].filter(Boolean).join(", "));
+  url.searchParams.set("limit","8");
+  return url;
+}
+
+function mapPhotonGeocodeFeature(feature) {
+  const properties = feature && feature.properties;
+  const coordinates = feature && feature.geometry && feature.geometry.coordinates;
+  const osmTypes = {N:"node",W:"way",R:"relation"};
+  const osmType = properties && osmTypes[properties.osm_type];
+  if (!properties || !osmType || typeof properties.name !== "string"
+    || !Array.isArray(coordinates) || coordinates.length < 2) return null;
+  const longitude = Number(coordinates[0]);
+  const latitude = Number(coordinates[1]);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+
+  const placeType = typeof properties.osm_value === "string" ? properties.osm_value : properties.type;
+  const address = {
+    country_code:typeof properties.countrycode === "string" ? properties.countrycode.toLocaleLowerCase("en-US") : "",
+    country:typeof properties.country === "string" ? properties.country : "",
+    state:typeof properties.state === "string" ? properties.state : (placeType === "state" ? properties.name : ""),
+    region:typeof properties.state === "string" ? properties.state : (placeType === "state" ? properties.name : "")
+  };
+  for (const key of ["city","town","village","municipality","hamlet"]) {
+    if (typeof properties[key] === "string") address[key] = properties[key];
+  }
+  if (["city","town","village","municipality","hamlet"].includes(placeType)) {
+    address[placeType] = properties.name;
+  }
+
+  let boundingbox;
+  if (Array.isArray(properties.extent) && properties.extent.length === 4) {
+    const [west,north,east,south] = properties.extent.map(Number);
+    if ([west,north,east,south].every(Number.isFinite)) {
+      boundingbox = [String(south),String(north),String(west),String(east)];
+    }
+  }
+  return {
+    name:properties.name,
+    osm_type:osmType,
+    addresstype:placeType,
+    lat:String(latitude),
+    lon:String(longitude),
+    address,
+    ...(boundingbox ? {boundingbox} : {})
+  };
+}
+
+async function geocode(city,region) {
+  const results = await requestPhoton(photonGeocodeUrl(city,region));
+  if (!results || !Array.isArray(results.features)) throw new Error("Invalid geocoding response");
+  const places = results.features
+    .filter(feature => {
+      const countryCode = feature && feature.properties && feature.properties.countrycode;
+      return !countryCode || countryCode.toLocaleUpperCase("en-US") === "IT";
+    })
+    .map(mapPhotonGeocodeFeature)
+    .filter(Boolean);
+  if (!city) return places.filter(place => place.addresstype === "state" && place.osm_type === "relation");
+  return places;
 }
 
 function enrichPhotonFeatures(features) {
@@ -995,9 +1045,7 @@ const server = http.createServer(async (request, response) => {
       center = {latitude,longitude};
     }
     try {
-      const results = await fetchJson(photonSearchUrl(bounds,center), {
-        headers:{"Accept":"application/json","User-Agent":"Catcha/1.0 (local activity discovery)"}
-      }, 10000);
+      const results = await requestPhoton(photonSearchUrl(bounds,center));
       if (!results || !Array.isArray(results.features)) return json(response, 502, {error:"Invalid place-search response"});
       let contactLookupAvailable = true;
       try {
