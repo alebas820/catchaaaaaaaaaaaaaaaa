@@ -572,6 +572,23 @@ function hasPublicWebsite(feature) {
     && value.split(/[;,]/).some(item => item.trim() && !/^(?:no|none|false|0|n\/a|unknown)$/i.test(item.trim())));
 }
 
+function featureWithinSearchRadius(feature,center) {
+  if (!center) return true;
+  const coordinates = feature && feature.geometry && feature.geometry.coordinates;
+  if (!Array.isArray(coordinates) || coordinates.length < 2) return false;
+  const longitude = Number(coordinates[0]);
+  const latitude = Number(coordinates[1]);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return false;
+  const radians = value => value * Math.PI / 180;
+  const deltaLatitude = radians(latitude - center.latitude);
+  const deltaLongitude = radians(longitude - center.longitude);
+  const a = Math.sin(deltaLatitude / 2) ** 2
+    + Math.cos(radians(center.latitude)) * Math.cos(radians(latitude)) * Math.sin(deltaLongitude / 2) ** 2;
+  const clamped = Math.min(1,Math.max(0,a));
+  const distance = 6371000 * 2 * Math.atan2(Math.sqrt(clamped),Math.sqrt(1 - clamped));
+  return distance <= nearbySearchRadiusMeters;
+}
+
 function parseBounds(value) {
   const bounds = value.split(",").map(Number);
   if (bounds.length !== 4 || !bounds.every(Number.isFinite)) return null;
@@ -1052,7 +1069,13 @@ const server = http.createServer(async (request, response) => {
     try {
       const results = await requestGeoapify("/v2/places",{},{
         method:"POST",
-        body:JSON.stringify({categories:geoapifyCategories,filter,limit:100,lang:"it"})
+        body:JSON.stringify({
+          categories:geoapifyCategories,
+          filter,
+          ...(center ? {bias:{type:"proximity",lon:center.longitude,lat:center.latitude}} : {}),
+          limit:500,
+          lang:"it"
+        })
       });
       if (!results || !Array.isArray(results.features)) return json(response, 502, {error:"Invalid place-search response"});
       for (const feature of results.features) {
@@ -1070,7 +1093,7 @@ const server = http.createServer(async (request, response) => {
         contactLookupAvailable = false;
         console.warn(`OSM contact lookup unavailable (${error.status || error.name || "unknown error"})`);
       }
-      results.features = results.features.filter(feature => !hasPublicWebsite(feature)).slice(0,50);
+      results.features = results.features.filter(feature => featureWithinSearchRadius(feature,center) && !hasPublicWebsite(feature));
       return json(response, 200, {...results,contactLookupAvailable});
     } catch (error) {
       return upstreamError(response, error);
