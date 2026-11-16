@@ -563,8 +563,12 @@ function mapBusiness(element, center) {
     const value = tags[key];
     if (value && /^https:\/\/[^\s]+$/i.test(value)) contacts.push({type:"url",value,label});
   }
-  const websiteValue = String(tags["contact:website"] || tags.website || tags.url || "").trim();
+  const websiteValue = [tags["contact:website"],tags.website,tags["contact:url"],tags.url]
+    .flatMap(value => String(value || "").split(/[;,]/))
+    .map(value => value.trim())
+    .find(value => value && !/^(?:no|none|false|0|n\/a|unknown)$/i.test(value)) || "";
   const website = websiteValue && /^https?:\/\//i.test(websiteValue) ? websiteValue : websiteValue ? `https://${websiteValue}` : "";
+  const hasWebsite = Boolean(websiteValue);
   if (website && /^https?:\/\/[^\s]+$/i.test(website) && !contacts.some(contact => contact.value === website)) {
     contacts.push({type:"url",value:website,label:"Sito web"});
   }
@@ -580,7 +584,8 @@ function mapBusiness(element, center) {
     region,
     area,
     locationLabel:parts || "Nelle vicinanze",
-    status:tags.website || tags["contact:website"] ? "SITO WEB INDICATO" : "SITO DA VERIFICARE",
+    status:hasWebsite ? "SITO WEB INDICATO" : "SITO DA VERIFICARE",
+    hasWebsite,
     address,
     openingHours:tags.opening_hours || "",
     sourceDescription:tags["description:it"] || tags.description || "",
@@ -705,10 +710,12 @@ async function loadNearbyBusinesses(latitude, longitude, options) {
         return !region || (state && (state.includes(region) || region.includes(state))) || (options.placeId && !state);
       })
       .map(feature => mapGeoapifyFeature(feature,center))
-      .filter(item => item && (item.distanceMeters === null || item.distanceMeters <= businessSearchRadiusMeters))
+      .filter(item => item && !item.hasWebsite
+        && (item.distanceMeters === null || item.distanceMeters <= businessSearchRadiusMeters))
       .sort((a,b) => Number.isFinite(a.distanceMeters) && Number.isFinite(b.distanceMeters)
         ? a.distanceMeters-b.distanceMeters
-        : a.name.localeCompare(b.name,"it"));
+        : a.name.localeCompare(b.name,"it"))
+      .slice(0,50);
     for (const item of results) item.contactLookupUnavailable = payload.contactLookupAvailable === false;
     return results;
   } finally {

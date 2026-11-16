@@ -557,6 +557,21 @@ function enrichOsmFeatures(features) {
   });
 }
 
+function hasPublicWebsite(feature) {
+  const properties = feature && feature.properties;
+  if (!properties) return false;
+  const raw = properties.extra && typeof properties.extra === "object"
+    ? properties.extra
+    : properties.datasource && properties.datasource.raw && typeof properties.datasource.raw === "object"
+      ? properties.datasource.raw : {};
+  const values = [
+    properties.website,properties.url,properties["contact:website"],properties["contact:url"],
+    raw.website,raw.url,raw["contact:website"],raw["contact:url"]
+  ];
+  return values.some(value => typeof value === "string"
+    && value.split(/[;,]/).some(item => item.trim() && !/^(?:no|none|false|0|n\/a|unknown)$/i.test(item.trim())));
+}
+
 function parseBounds(value) {
   const bounds = value.split(",").map(Number);
   if (bounds.length !== 4 || !bounds.every(Number.isFinite)) return null;
@@ -1037,7 +1052,7 @@ const server = http.createServer(async (request, response) => {
     try {
       const results = await requestGeoapify("/v2/places",{},{
         method:"POST",
-        body:JSON.stringify({categories:geoapifyCategories,filter,limit:50,lang:"it"})
+        body:JSON.stringify({categories:geoapifyCategories,filter,limit:100,lang:"it"})
       });
       if (!results || !Array.isArray(results.features)) return json(response, 502, {error:"Invalid place-search response"});
       for (const feature of results.features) {
@@ -1055,6 +1070,7 @@ const server = http.createServer(async (request, response) => {
         contactLookupAvailable = false;
         console.warn(`OSM contact lookup unavailable (${error.status || error.name || "unknown error"})`);
       }
+      results.features = results.features.filter(feature => !hasPublicWebsite(feature)).slice(0,50);
       return json(response, 200, {...results,contactLookupAvailable});
     } catch (error) {
       return upstreamError(response, error);
