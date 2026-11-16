@@ -16,5 +16,7 @@ services:
         sync: false
       - key: CATCHA_SESSION_SECRET
         sync: false
+      - key: GEOAPIFY_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
         sync: false

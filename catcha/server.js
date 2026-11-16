@@ -9,6 +9,7 @@ const sessionSecret = process.env.CATCHA_SESSION_SECRET;
 const dataDirectory = path.resolve(process.env.CATCHA_DATA_DIR || path.join(root,"data"));
 const nearbySearchRadiusMeters = 15000;
 const geminiApiKey = process.env.GEMINI_API_KEY;
+const geoapifyApiKey = process.env.GEOAPIFY_API_KEY;
 const geminiModel = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 const sessions = new Map();
 const managedUsers = new Map();
@@ -18,7 +19,7 @@ const dataWriteQueues = new Map();
 const deletingAccounts = new Set();
 let managedUsersWriteQueue = Promise.resolve();
 const secureCookie = process.env.NODE_ENV === "production";
-const osmBusinessId = /^osm-(node|way|relation)-\d+$/;
+const mapBusinessId = /^(?:osm-(node|way|relation)-\d+|geoapify-[A-Za-z0-9_-]{2,2048})$/;
 const managedUsersFile = path.join(dataDirectory,"users.json");
 const passwordHashBytes = 64;
 const passwordSaltBytes = 16;
@@ -82,16 +83,11 @@ if (secureCookie && (!adminAccount || !sessionSecret || sessionSecret.length < 3
 if (secureCookie && [adminAccount,...configuredUsers].filter(Boolean).some(account => account.password.length < 16)) {
   throw new Error("Production requires every configured account to have a unique password of at least 16 characters.");
 }
-const photonCategories = [
-  "osm.shop","osm.craft","osm.amenity.cafe","osm.amenity.restaurant","osm.amenity.fast_food",
-  "osm.amenity.bar","osm.amenity.pub","osm.amenity.ice_cream","osm.amenity.marketplace",
-  "osm.amenity.library","osm.amenity.arts_centre","osm.amenity.community_centre",
-  "osm.amenity.theatre","osm.amenity.cinema"
-];
+const geoapifyCategories = ["commercial","catering","activity","entertainment","education"];
 let nextGeocodeAt = 0;
 let geocodeQueue = Promise.resolve();
-let nextPhotonRequestAt = 0;
-let photonRequestQueue = Promise.resolve();
+let nextGeoapifyRequestAt = 0;
+let geoapifyRequestQueue = Promise.resolve();
 const publicMapHeaders = {"Accept":"application/json","User-Agent":"Catcha/1.0 (+https://github.com/alebas820/catchaaaaaaaaaaaaaaaa)"};
 
 const mimeTypes = {
@@ -171,7 +167,8 @@ function boundedText(value, limit) {
 
 function savedBusinessForStorage(item,id) {
   if (!item || typeof item !== "object" || Array.isArray(item) || item.id !== id
-    || !osmBusinessId.test(id) || item.fromOpenStreetMap !== true || typeof item.name !== "string" || !item.name.trim()) return null;
+    || !mapBusinessId.test(id) || (item.fromOpenStreetMap !== true && item.fromGeoapify !== true)
+    || typeof item.name !== "string" || !item.name.trim()) return null;
   const contacts = Array.isArray(item.contacts) ? item.contacts.slice(0,20)
     .filter(contact => contact && ["email","phone","url"].includes(contact.type) && typeof contact.value === "string")
     .map(contact => ({
@@ -197,7 +194,8 @@ function savedBusinessForStorage(item,id) {
     emoji:boundedText(item.emoji,12),
     visual:["cafe","flower","food","studio","bakery","book"].includes(item.visual) ? item.visual : "studio",
     opportunity:boundedText(item.opportunity,1000),
-    fromOpenStreetMap:true,
+    fromOpenStreetMap:item.fromOpenStreetMap === true,
+    fromGeoapify:item.fromGeoapify === true,
     contactLookupUnavailable:item.contactLookupUnavailable === true,
     osmType:["node","way","relation"].includes(item.osmType) ? item.osmType : "",
     osmId:boundedText(String(item.osmId || ""),30),
@@ -227,7 +225,7 @@ function sanitizeUserData(payload) {
   if (progressEntries.length > 500 || businessEntries.length > 500) return null;
   const progress = {};
   for (const [id,state] of progressEntries) {
-    if (!osmBusinessId.test(id) || !["contact","later"].includes(state)) return null;
+    if (!mapBusinessId.test(id) || !["contact","later"].includes(state)) return null;
     progress[id] = state;
   }
   const savedBusinesses = {};
@@ -458,82 +456,74 @@ function queueNominatim(work) {
   return request;
 }
 
-function requestPhoton(url, timeoutMs = 10000) {
-  const request = photonRequestQueue.catch(() => undefined).then(async () => {
-    const wait = Math.max(0,nextPhotonRequestAt - Date.now());
+function requestGeoapify(pathname, parameters, options = {}, timeoutMs = 15000) {
+  if (!geoapifyApiKey) {
+    const error = new Error("Geoapify API key is not configured");
+    error.code = "GEOAPIFY_NOT_CONFIGURED";
+    return Promise.reject(error);
+  }
+  const url = new URL(pathname,"https://api.geoapify.com");
+  for (const [key,value] of Object.entries(parameters)) url.searchParams.set(key,String(value));
+  url.searchParams.set("apiKey",geoapifyApiKey);
+  const request = geoapifyRequestQueue.catch(() => undefined).then(async () => {
+    const wait = Math.max(0,nextGeoapifyRequestAt - Date.now());
     if (wait) await new Promise(resolve => setTimeout(resolve,wait));
-    nextPhotonRequestAt = Date.now() + 1100;
-    return fetchJson(url,{headers:publicMapHeaders},timeoutMs);
+    nextGeoapifyRequestAt = Date.now() + 250;
+    return fetchJson(url,{
+      headers:{"Accept":"application/json","Content-Type":"application/json"},
+      ...options
+    },timeoutMs);
   });
-  photonRequestQueue = request.then(() => undefined,() => undefined);
+  geoapifyRequestQueue = request.then(() => undefined,() => undefined);
   return request;
 }
 
-function photonGeocodeUrl(city,region) {
-  const url = new URL("https://photon.komoot.io/api/");
-  url.searchParams.set("q",[city,region].filter(Boolean).join(", "));
-  url.searchParams.set("limit","8");
-  return url;
-}
-
-function mapPhotonGeocodeFeature(feature) {
-  const properties = feature && feature.properties;
-  const coordinates = feature && feature.geometry && feature.geometry.coordinates;
-  const osmTypes = {N:"node",W:"way",R:"relation"};
-  const osmType = properties && osmTypes[properties.osm_type];
-  if (!properties || !osmType || typeof properties.name !== "string"
-    || !Array.isArray(coordinates) || coordinates.length < 2) return null;
-  const longitude = Number(coordinates[0]);
-  const latitude = Number(coordinates[1]);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-
-  const placeType = typeof properties.osm_value === "string" ? properties.osm_value : properties.type;
-  const address = {
-    country_code:typeof properties.countrycode === "string" ? properties.countrycode.toLocaleLowerCase("en-US") : "",
-    country:typeof properties.country === "string" ? properties.country : "",
-    state:typeof properties.state === "string" ? properties.state : (placeType === "state" ? properties.name : ""),
-    region:typeof properties.state === "string" ? properties.state : (placeType === "state" ? properties.name : "")
-  };
-  for (const key of ["city","town","village","municipality","hamlet"]) {
-    if (typeof properties[key] === "string") address[key] = properties[key];
-  }
-  if (["city","town","village","municipality","hamlet"].includes(placeType)) {
-    address[placeType] = properties.name;
-  }
-
-  let boundingbox;
-  if (Array.isArray(properties.extent) && properties.extent.length === 4) {
-    const [west,north,east,south] = properties.extent.map(Number);
-    if ([west,north,east,south].every(Number.isFinite)) {
-      boundingbox = [String(south),String(north),String(west),String(east)];
-    }
-  }
-  return {
-    name:properties.name,
-    osm_type:osmType,
-    addresstype:placeType,
-    lat:String(latitude),
-    lon:String(longitude),
-    address,
-    ...(boundingbox ? {boundingbox} : {})
-  };
-}
-
 async function geocode(city,region) {
-  const results = await requestPhoton(photonGeocodeUrl(city,region));
-  if (!results || !Array.isArray(results.features)) throw new Error("Invalid geocoding response");
-  const places = results.features
-    .filter(feature => {
-      const countryCode = feature && feature.properties && feature.properties.countrycode;
-      return !countryCode || countryCode.toLocaleUpperCase("en-US") === "IT";
+  const results = await requestGeoapify("/v1/geocode/search",{
+    text:[city,region,"Italia"].filter(Boolean).join(", "),
+    filter:"countrycode:it",
+    format:"json",
+    lang:"it",
+    limit:8,
+    ...(!city ? {type:"state"} : {})
+  });
+  if (!results || !Array.isArray(results.results)) throw new Error("Invalid geocoding response");
+  return results.results
+    .filter(result => result && typeof result.name === "string"
+      && String(result.country_code || "").toLocaleLowerCase("en-US") === "it"
+      && Number.isFinite(Number(result.lat)) && Number.isFinite(Number(result.lon)))
+    .map(result => {
+      const resultType = typeof result.result_type === "string" ? result.result_type : "";
+      const raw = result.datasource && result.datasource.raw && typeof result.datasource.raw === "object"
+        ? result.datasource.raw : {};
+      const placeType = resultType === "state" ? "state"
+        : resultType === "county" ? "municipality"
+          : resultType;
+      const address = {
+        country_code:"it",
+        country:typeof result.country === "string" ? result.country : "Italia",
+        state:typeof result.state === "string" ? result.state : "",
+        region:typeof result.state === "string" ? result.state : ""
+      };
+      for (const key of ["city","town","village","municipality","hamlet"]) {
+        if (typeof result[key] === "string") address[key] = result[key];
+      }
+      if (placeType === "city") address.city = result.city || result.name;
+      if (placeType === "state") address.state = address.region = result.state || result.name;
+      return {
+        name:result.name,
+        addresstype:placeType,
+        lat:String(result.lat),
+        lon:String(result.lon),
+        address,
+        place_id:typeof result.place_id === "string" ? result.place_id : "",
+        osm_type:typeof raw.osm_type === "string" ? raw.osm_type : ""
+      };
     })
-    .map(mapPhotonGeocodeFeature)
-    .filter(Boolean);
-  if (!city) return places.filter(place => place.addresstype === "state" && place.osm_type === "relation");
-  return places;
+    .filter(place => city || place.addresstype === "state");
 }
 
-function enrichPhotonFeatures(features) {
+function enrichOsmFeatures(features) {
   const types = {N:"N",W:"W",R:"R",node:"N",way:"W",relation:"R"};
   const ids = [...new Set(features.map(feature => {
     const properties = feature && feature.properties;
@@ -587,23 +577,13 @@ function boundsAround(latitude, longitude) {
   ];
 }
 
-function photonSearchUrl(bounds, center) {
-  const url = new URL("https://photon.komoot.io/api/");
-  url.searchParams.set("bbox",bounds.join(","));
-  url.searchParams.set("limit","50");
-  url.searchParams.set("include",photonCategories.join(","));
-  if (center) {
-    url.searchParams.set("lat",String(center.latitude));
-    url.searchParams.set("lon",String(center.longitude));
-  }
-  return url;
-}
-
 function upstreamError(response, error) {
   const reason = error && (error.status || (error.cause && error.cause.code) || error.name);
   console.warn(`Map provider request failed (${reason || "unknown error"})`);
   if (error.name === "AbortError") return json(response, 504, {error:"Map request timed out"});
   if (error.status === 429) return json(response, 429, {error:"Map service is busy"});
+  if (error.code === "GEOAPIFY_NOT_CONFIGURED") return json(response, 503, {error:"Geoapify API key is not configured"});
+  if (error.status === 401 || error.status === 403) return json(response, 503, {error:"Geoapify API key is invalid or not enabled for this API"});
   return json(response, 502, {error:"Map service is unavailable"});
 }
 
@@ -1029,29 +1009,48 @@ const server = http.createServer(async (request, response) => {
   }
   if (request.method === "GET" && pathname === "/api/nearby") {
     const params = new URL(request.url, "http://localhost").searchParams;
+    const placeId = params.get("placeId");
     const bboxValue = params.get("bbox");
     const latitudeValue = params.get("lat") || params.get("latitude");
     const longitudeValue = params.get("lon") || params.get("lng") || params.get("longitude");
     const latitude = latitudeValue === null ? NaN : Number(latitudeValue);
     const longitude = longitudeValue === null ? NaN : Number(longitudeValue);
-    let bounds;
+    let filter;
     let center = null;
-    if (bboxValue !== null) {
-      bounds = parseBounds(bboxValue);
+    if (placeId !== null) {
+      if (placeId.length < 2 || placeId.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(placeId)) {
+        return json(response,400,{error:"Invalid map search place"});
+      }
+      filter = {type:"place",id:placeId};
+    } else if (bboxValue !== null) {
+      const bounds = parseBounds(bboxValue);
       if (!bounds) return json(response, 400, {error:"Invalid map search bounds"});
+      filter = {type:"rect",lon1:bounds[0],lat1:bounds[1],lon2:bounds[2],lat2:bounds[3]};
     } else {
       if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
         return json(response, 400, {error:"Invalid map search location"});
       }
-      bounds = boundsAround(latitude,longitude);
+      const bounds = boundsAround(latitude,longitude);
+      filter = {type:"rect",lon1:bounds[0],lat1:bounds[1],lon2:bounds[2],lat2:bounds[3]};
       center = {latitude,longitude};
     }
     try {
-      const results = await requestPhoton(photonSearchUrl(bounds,center));
+      const results = await requestGeoapify("/v2/places",{},{
+        method:"POST",
+        body:JSON.stringify({categories:geoapifyCategories,filter,limit:50,lang:"it"})
+      });
       if (!results || !Array.isArray(results.features)) return json(response, 502, {error:"Invalid place-search response"});
+      for (const feature of results.features) {
+        const properties = feature && feature.properties;
+        const raw = properties && properties.datasource && properties.datasource.raw;
+        if (!properties || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        properties.extra = raw;
+        if (typeof raw.osm_type === "string") properties.osm_type = raw.osm_type;
+        if (raw.osm_id !== undefined) properties.osm_id = raw.osm_id;
+      }
       let contactLookupAvailable = true;
       try {
-        await enrichPhotonFeatures(results.features);
+        await enrichOsmFeatures(results.features);
       } catch (error) {
         contactLookupAvailable = false;
         console.warn(`OSM contact lookup unavailable (${error.status || error.name || "unknown error"})`);

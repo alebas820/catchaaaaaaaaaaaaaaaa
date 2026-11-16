@@ -4,7 +4,7 @@ const storageKey = "catcha-progress-v1";
 const savedBusinessesKey = "catcha-saved-businesses-v1";
 const legacyStorageKey = "catcha-demo-progress-v1";
 const legacySavedBusinessesKey = "catcha-demo-saved-businesses-v1";
-const osmBusinessId = /^osm-(node|way|relation)-\d+$/;
+const mapBusinessId = /^(?:osm-(node|way|relation)-\d+|geoapify-[A-Za-z0-9_-]{2,2048})$/;
 const savedVisuals = new Set(["cafe","flower","food","studio","bakery","book"]);
 const businessSearchRadiusKm = 15;
 const businessSearchRadiusMeters = businessSearchRadiusKm * 1000;
@@ -35,7 +35,7 @@ function readLegacyProgress() {
       ...(current && typeof current === "object" && !Array.isArray(current) ? current : {})
     };
     const cleaned = Object.fromEntries(Object.entries(merged)
-      .filter(([id,state]) => osmBusinessId.test(id) && ["contact","later"].includes(state)));
+      .filter(([id,state]) => mapBusinessId.test(id) && ["contact","later"].includes(state)));
     return cleaned;
   } catch {
     return {};
@@ -74,7 +74,9 @@ function safeSavedUrl(value) {
 }
 
 function sanitizeSavedBusiness(item,id) {
-  if (!item || typeof item !== "object" || item.id !== id || !osmBusinessId.test(id) || item.fromOpenStreetMap !== true || typeof item.name !== "string" || !item.name.trim()) return null;
+  if (!item || typeof item !== "object" || item.id !== id || !mapBusinessId.test(id)
+    || (item.fromOpenStreetMap !== true && item.fromGeoapify !== true)
+    || typeof item.name !== "string" || !item.name.trim()) return null;
   const contacts = Array.isArray(item.contacts) ? item.contacts
     .filter(contact => contact && ["email","phone","url"].includes(contact.type) && typeof contact.value === "string")
     .map(contact => ({
@@ -100,7 +102,8 @@ function sanitizeSavedBusiness(item,id) {
     emoji:safeSavedText(item.emoji,12),
     visual:savedVisuals.has(item.visual) ? item.visual : "studio",
     opportunity:safeSavedText(item.opportunity,1000),
-    fromOpenStreetMap:true,
+    fromOpenStreetMap:item.fromOpenStreetMap === true,
+    fromGeoapify:item.fromGeoapify === true,
     contactLookupUnavailable:item.contactLookupUnavailable === true,
     osmType:["node","way","relation"].includes(item.osmType) ? item.osmType : "",
     osmId:safeSavedText(String(item.osmId || ""),30),
@@ -159,7 +162,7 @@ function applyUserData(data) {
     throw new Error("Il server ha restituito dati dell'account non validi.");
   }
   progress = Object.fromEntries(Object.entries(data.progress)
-    .filter(([id,state]) => osmBusinessId.test(id) && ["contact","later"].includes(state)));
+    .filter(([id,state]) => mapBusinessId.test(id) && ["contact","later"].includes(state)));
   savedBusinesses = Object.fromEntries(Object.entries(data.savedBusinesses)
     .map(([id,item]) => [id,sanitizeSavedBusiness(item,id)])
     .filter(([,item]) => item));
@@ -239,7 +242,7 @@ function renderCards(items, gridId = "business-grid") {
     card.setAttribute("aria-label", `${business.name}, ${place}. Apri dettagli.`);
     card.innerHTML = `<div class="business-visual visual-${business.visual}"><span class="visual-object" aria-hidden="true">${escapeHtml(business.emoji)}</span><span class="status-pill live-status">${escapeHtml(status)}</span><button class="save-button ${state === "later" ? "is-saved" : ""}" type="button" aria-label="${state === "later" ? "Rimuovi dai promemoria" : "Aggiungi ai promemoria"}" title="Promemoria">${state === "later" ? "★" : "☆"}</button></div>
       <div class="business-info"><span class="business-type">${escapeHtml(business.category)}</span><h3>${escapeHtml(business.name)}</h3><div class="business-location">⌖ ${escapeHtml(place)}</div><p class="business-description">${escapeHtml(business.description)}</p><div class="business-contacts">${publicContacts || `<span class="no-public-contact">${escapeHtml(contactFallback)}</span>`}</div>
-      <div class="business-signals"><span class="signal-count"><span class="signal-dot"></span>Fonte: OpenStreetMap</span><span>Verifica i dati prima del contatto</span></div>
+      <div class="business-signals"><span class="signal-count"><span class="signal-dot"></span>Fonte: ${business.fromOpenStreetMap ? "OpenStreetMap" : "Geoapify"}</span><span>Verifica i dati prima del contatto</span></div>
       <div class="card-actions"><button class="action-contact ${state === "contact" ? "selected" : ""}" type="button">${state === "contact" ? "✓ In lista contatti" : "＋ Da contattare"}</button><button class="action-later ${state === "later" ? "selected" : ""}" type="button">${state === "later" ? "★ In promemoria" : "☆ Per dopo"}</button></div></div>`;
     if (business.photoUrl) {
       const photo = document.createElement("img");
@@ -440,9 +443,10 @@ function openBusiness(id) {
   const item = businessById(id);
   if (!item) return;
   const contacts = (item.contacts || []).map(contactMarkup).filter(Boolean).join(" · ");
+  const sourceName = item.fromOpenStreetMap ? "OpenStreetMap" : "Geoapify";
   const contactLabel = contacts
-    ? "Contatti pubblicati nella scheda OpenStreetMap"
-    : item.contactLookupUnavailable ? "Ricerca dei recapiti non disponibile; verifica la scheda OSM" : "La scheda OpenStreetMap non riporta recapiti pubblici";
+    ? `Contatti pubblicati nella scheda ${sourceName}`
+    : item.contactLookupUnavailable ? "Ricerca dei recapiti non disponibile; verifica i dati della scheda" : `La scheda ${sourceName} non riporta recapiti pubblici`;
   const profileDetails = [
     ["INDIRIZZO",item.address],
     ["ORARI",item.openingHours],
@@ -455,7 +459,7 @@ function openBusiness(id) {
   const osmLink = item.osmType && item.osmId ? `<p><a class="osm-source-link" href="https://www.openstreetmap.org/${encodeURIComponent(item.osmType)}/${encodeURIComponent(item.osmId)}" target="_blank" rel="noopener noreferrer">Apri la scheda su OpenStreetMap ↗</a></p>` : "";
   document.getElementById("business-detail").innerHTML = `<div class="detail-top"><span class="business-type">${escapeHtml(item.category)}</span><h2>${escapeHtml(item.name)}</h2><p>${escapeHtml(businessPlace(item))}</p></div>
     <div class="detail-content">${photoPanel}${profileDetails}<h3>Un'idea da esplorare</h3><p>${escapeHtml(item.opportunity)}</p><h3>Probabilità di approvazione</h3><p>Non calcolabile dai dati disponibili: dipende da budget, priorità, tempi e qualità della proposta. Chiedi direttamente all'attività.</p><h3>Prima di contattarla</h3><ul><li>Verifica che il progetto sia adatto alle reali esigenze dell'attività.</li><li>Controlla i canali ufficiali e chiedi il permesso prima di usare loghi o immagini.</li><li>La mappa non conferma che l'attività sia priva di sito: verifica prima di proporre il lavoro.</li></ul>
-    <div class="detail-contact"><strong>CONTATTO</strong><span>${escapeHtml(contactLabel)}</span>${contacts ? `<span class="public-contacts">${contacts}</span>` : ""}<span class="contact-guidance">${item.contactLookupUnavailable ? "I recapiti non sono stati recuperati in questa ricerca; puoi controllare o aggiornare la scheda OpenStreetMap." : "La scheda potrebbe non contenere recapiti. Verifica anche i canali ufficiali dell'attività."}</span></div>${osmLink}
+    <div class="detail-contact"><strong>CONTATTO</strong><span>${escapeHtml(contactLabel)}</span>${contacts ? `<span class="public-contacts">${contacts}</span>` : ""}<span class="contact-guidance">${item.contactLookupUnavailable ? "I recapiti non sono stati recuperati in questa ricerca; verifica i dati della scheda." : "La scheda potrebbe non contenere recapiti. Verifica anche i canali ufficiali dell'attività."}</span></div>${osmLink}
     <div class="detail-buttons"><button class="button button-outline" id="detail-later" type="button">☆ Per dopo</button><button class="button button-dark" id="detail-contact" type="button">＋ Da contattare</button></div></div>`;
   const modal = document.getElementById("business-modal");
   modal.showModal();
@@ -567,8 +571,9 @@ function mapBusiness(element, center) {
   const parts = [area,city,region].filter(Boolean).join(", ");
   const distanceMeters = center ? distanceBetween(center.latitude,center.longitude,lat,lon) : null;
   const photo = getWikimediaPhoto(tags);
+  const sourceName = element.fromOpenStreetMap === false ? "Geoapify" : "OpenStreetMap";
   return {
-    id:`osm-${element.type}-${element.id}`,
+    id:element.businessId || `osm-${element.type}-${element.id}`,
     name,
     category:category.category,
     city,
@@ -584,37 +589,60 @@ function mapBusiness(element, center) {
     photoPageUrl:photo && photo.page,
     description:tags["description:it"] || tags.description || (Number.isFinite(distanceMeters)
       ? `Attività mappata a ${formatDistance(distanceMeters)}. Verifica sui canali ufficiali se ha già un sito.`
-      : "Attività presente nella mappa OpenStreetMap. Verifica sui canali ufficiali se ha già un sito."),
+      : `Attività presente nei dati ${sourceName}. Verifica sui canali ufficiali se ha già un sito.`),
     emoji:category.emoji,
     visual:category.visual,
     contacts,
     opportunity:"Verifica prima se esiste già un sito. Se manca, chiedi all'attività quali esigenze digitali vorrebbe risolvere.",
-    fromOpenStreetMap:true,
-    osmType:element.type,
-    osmId:element.id,
+    fromOpenStreetMap:element.fromOpenStreetMap !== false,
+    fromGeoapify:element.fromGeoapify === true,
+    osmType:element.osmType !== undefined ? element.osmType : element.type,
+    osmId:element.osmId !== undefined ? element.osmId : element.id,
     distanceMeters
   };
 }
 
-function mapPhotonFeature(feature, center) {
+function mapGeoapifyFeature(feature, center) {
+  if (!feature || typeof feature !== "object") return null;
   const properties = feature.properties || {};
   const coordinates = feature.geometry && feature.geometry.coordinates;
-  const types = {N:"node",W:"way",R:"relation"};
-  const type = types[properties.osm_type];
-  const osmId = Number(properties.osm_id);
+  const raw = properties.extra && typeof properties.extra === "object"
+    ? properties.extra
+    : properties.datasource?.raw && typeof properties.datasource.raw === "object" ? properties.datasource.raw : {};
+  const types = {N:"node",W:"way",R:"relation",n:"node",w:"way",r:"relation",node:"node",way:"way",relation:"relation"};
+  const type = types[raw.osm_type || properties.osm_type];
+  const osmId = Number(raw.osm_id || properties.osm_id);
   const longitude = Array.isArray(coordinates) ? Number(coordinates[0]) : NaN;
   const latitude = Array.isArray(coordinates) ? Number(coordinates[1]) : NaN;
   const name = typeof properties.name === "string" ? properties.name.trim() : "";
-  if (!type || !Number.isSafeInteger(osmId) || osmId <= 0 || !name || !Number.isFinite(longitude) || !Number.isFinite(latitude) || Math.abs(longitude) > 180 || Math.abs(latitude) > 90) return null;
-  const extra = properties.extra && typeof properties.extra === "object" ? properties.extra : {};
-  const tags = {...extra,name};
-  if (["shop","craft","amenity"].includes(properties.osm_key)) tags[properties.osm_key] = properties.osm_value;
+  const hasOsmId = type && Number.isSafeInteger(osmId) && osmId > 0;
+  const placeId = typeof properties.place_id === "string" ? properties.place_id : "";
+  const businessId = hasOsmId ? `osm-${type}-${osmId}` : placeId ? `geoapify-${placeId}` : "";
+  if (!businessId || !name || !Number.isFinite(longitude) || !Number.isFinite(latitude) || Math.abs(longitude) > 180 || Math.abs(latitude) > 90) return null;
+  const tags = {...raw,name};
+  const categories = Array.isArray(properties.categories) ? properties.categories : [];
+  if (!tags.shop && !tags.craft && !tags.amenity) {
+    const category = categories.find(value => typeof value === "string") || "";
+    if (category === "commercial") tags.shop = "shop";
+    else if (category.startsWith("commercial.")) tags.shop = category.slice("commercial.".length).split(".").pop();
+    else if (category.startsWith("catering.")) {
+      const type = category.slice("catering.".length).split(".")[0];
+      tags.amenity = type === "cafe" ? "cafe" : type === "restaurant" ? "restaurant"
+        : type === "fast_food" ? "fast_food" : type === "bar" ? "bar" : type === "pub" ? "pub"
+          : type === "ice_cream" ? "ice_cream" : "";
+    } else if (category === "activity.community_center") tags.amenity = "community_centre";
+    else if (category.includes("theatre")) tags.amenity = "theatre";
+    else if (category.includes("cinema")) tags.amenity = "cinema";
+    else if (category.includes("library")) tags.amenity = "library";
+    else if (category.includes("marketplace")) tags.shop = "marketplace";
+  }
   const addressTags = {
     street:"addr:street",
     housenumber:"addr:housenumber",
     postcode:"addr:postcode",
     city:"addr:city",
     state:"addr:state",
+    suburb:"addr:suburb",
     district:"addr:suburb",
     county:"addr:county"
   };
@@ -624,9 +652,15 @@ function mapPhotonFeature(feature, center) {
   for (const key of ["phone","mobile","email","website","url","opening_hours","cuisine","description","wikimedia_commons","image"]) {
     if (properties[key]) tags[key] = properties[key];
   }
+  const sourceName = String(properties.datasource?.sourcename || "").toLocaleLowerCase("en-US");
   return mapBusiness({
-    type,
-    id:osmId,
+    type:type || "node",
+    id:hasOsmId ? osmId : 0,
+    businessId,
+    fromOpenStreetMap:hasOsmId || sourceName.includes("openstreetmap"),
+    fromGeoapify:true,
+    osmType:hasOsmId ? type : "",
+    osmId:hasOsmId ? osmId : "",
     lon:longitude,
     lat:latitude,
     tags
@@ -636,7 +670,9 @@ function mapPhotonFeature(feature, center) {
 async function loadNearbyBusinesses(latitude, longitude, options) {
   const params = new URLSearchParams();
   let center = null;
-  if (options.bbox) {
+  if (options.placeId) {
+    params.set("placeId",options.placeId);
+  } else if (options.bbox) {
     params.set("bbox",options.bbox.join(","));
   } else {
     const lat = Number(latitude);
@@ -658,6 +694,7 @@ async function loadNearbyBusinesses(latitude, longitude, options) {
     if (!response.ok) {
       if (payload?.error === "Invalid map search bounds") throw new Error("I confini restituiti per la regione non sono validi. Prova a cercare una città della regione.");
       if (payload?.error === "Invalid map search location") throw new Error("Le coordinate della posizione non sono valide. Riprova con una città o aggiorna la posizione del browser.");
+      if (payload?.error?.includes("Geoapify API key")) throw new Error("La chiave Geoapify non è configurata correttamente sul server.");
       throw new Error(`Servizio di ricerca delle attività non disponibile (HTTP ${response.status}).`);
     }
     if (!payload || !Array.isArray(payload.features)) throw new Error("La risposta della ricerca luoghi non è valida.");
@@ -665,9 +702,9 @@ async function loadNearbyBusinesses(latitude, longitude, options) {
     const results = payload.features
       .filter(feature => {
         const state = normalizePlace(feature.properties?.state || "");
-        return !region || state && (state.includes(region) || region.includes(state));
+        return !region || (state && (state.includes(region) || region.includes(state))) || (options.placeId && !state);
       })
-      .map(feature => mapPhotonFeature(feature,center))
+      .map(feature => mapGeoapifyFeature(feature,center))
       .filter(item => item && (item.distanceMeters === null || item.distanceMeters <= businessSearchRadiusMeters))
       .sort((a,b) => Number.isFinite(a.distanceMeters) && Number.isFinite(b.distanceMeters)
         ? a.distanceMeters-b.distanceMeters
@@ -689,9 +726,12 @@ async function geocodePlace(city, region) {
   const timeoutId = setTimeout(() => controller.abort(), 20000);
   try {
     const response = await fetch(`/api/geocode?${params}`, {credentials:"same-origin",signal:controller.signal});
-    if (!response.ok) throw new Error(response.status === 429
-      ? "Il servizio di ricerca geografica è occupato. Riprova tra poco."
-      : `Servizio di ricerca geografica non disponibile (HTTP ${response.status}).`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      if (response.status === 429) throw new Error("Il servizio di ricerca geografica è occupato. Riprova tra poco.");
+      if (payload?.error?.includes("Geoapify API key")) throw new Error("La chiave Geoapify non è configurata correttamente sul server.");
+      throw new Error(`Servizio di ricerca geografica non disponibile (HTTP ${response.status}).`);
+    }
     const results = await response.json();
     if (!Array.isArray(results)) throw new Error("Risposta geografica non valida.");
     const italianResults = results.filter(result => !result.address?.country_code || result.address.country_code === "it");
@@ -706,18 +746,11 @@ async function geocodePlace(city, region) {
     if (normalizedRegion && !matchingResults.length) throw new Error("Non trovo questa città nella regione indicata. Controlla i nomi e riprova.");
     if (!city) {
       const result = matchingResults[0];
-      if (result.osm_type !== "relation" || !Array.isArray(result.boundingbox) || result.boundingbox.length !== 4) {
+      if (typeof result.place_id !== "string" || !result.place_id) {
         throw new Error("Non riesco a trovare il confine della regione sulla mappa. Prova con una città della regione.");
       }
-      const bbox = [
-        Number(result.boundingbox[2]),
-        Number(result.boundingbox[0]),
-        Number(result.boundingbox[3]),
-        Number(result.boundingbox[1])
-      ];
-      if (!bbox.every(Number.isFinite)) throw new Error("La mappa non ha restituito i confini di questa regione.");
       return {
-        bbox,
+        placeId:result.place_id,
         label:result.name || region
       };
     }
@@ -777,9 +810,9 @@ async function findNearby() {
     document.getElementById("search-input").value = "";
     document.getElementById("region-input").value = "";
     document.getElementById("city-input").value = "";
-    showLiveBusinesses(nearby,`Photon / OpenStreetMap · entro ${businessSearchRadiusKm} km`);
+    showLiveBusinesses(nearby,`Geoapify · entro ${businessSearchRadiusKm} km`);
     status.textContent = nearby.length
-      ? `Mappa caricata: ${nearby.length} attività entro ${businessSearchRadiusKm} km. Dati OpenStreetMap tramite Photon, non verificati in tempo reale.`
+      ? `Mappa caricata: ${nearby.length} attività entro ${businessSearchRadiusKm} km. Dati Geoapify, non verificati in tempo reale.`
       : `Nessuna attività compatibile trovata entro ${businessSearchRadiusKm} km. Puoi riprovare più tardi.`;
   } catch (error) {
     status.textContent = locationErrorMessage(error);
@@ -801,19 +834,19 @@ async function findPlace() {
   status.textContent = "Cerco il luogo sulla mappa…";
   try {
     const place = await geocodePlace(city,region);
-    status.textContent = place.bbox
+    status.textContent = place.placeId
       ? `Cerco le attività nella regione ${place.label}…`
       : `Cerco le attività vicino a ${place.label}…`;
-    const results = place.bbox
-      ? await loadNearbyBusinesses(null,null,{bbox:place.bbox,region})
+    const results = place.placeId
+      ? await loadNearbyBusinesses(null,null,{placeId:place.placeId,region})
       : await loadNearbyBusinesses(place.latitude,place.longitude,{});
     document.getElementById("search-input").value = "";
-    showLiveBusinesses(results,place.bbox
-      ? `Photon / OpenStreetMap · regione ${place.label} · max 50`
-      : `Photon / OpenStreetMap · ${place.label} · raggio ${businessSearchRadiusKm} km`);
-    status.textContent = place.bbox
+    showLiveBusinesses(results,place.placeId
+      ? `Geoapify · regione ${place.label} · max 50`
+      : `Geoapify · ${place.label} · raggio ${businessSearchRadiusKm} km`);
+    status.textContent = place.placeId
       ? `${results.length} attività trovate per ${place.label}${results.length === 50 ? " (mostrate fino a 50)" : ""}. Recapiti e siti non verificati.`
-      : `${results.length} attività trovate entro ${businessSearchRadiusKm} km da ${place.label}. Dati OpenStreetMap tramite Photon, non verificati in tempo reale.`;
+      : `${results.length} attività trovate entro ${businessSearchRadiusKm} km da ${place.label}. Dati di Geoapify, non verificati in tempo reale.`;
   } catch (error) {
     status.textContent = locationErrorMessage(error);
   } finally {
